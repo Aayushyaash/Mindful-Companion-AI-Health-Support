@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { AppView, ChatMessage, Persona } from '../types';
 import { createChat, analyzeMood, extractInfoFromDocument } from '../services/geminiService';
-import { ArrowLeft, Send, Paperclip, X, Mic, MicOff, Video, VideoOff, Loader, User, Bot, Smile, Meh, Frown } from 'lucide-react';
+import { ArrowLeft, Send, Paperclip, X, Mic, MicOff, Video, Loader, User, Bot, Smile, Meh, Frown, PlusSquare, Undo2, History } from 'lucide-react';
 import type { Chat as GeminiChat } from '@google/genai';
 import { GoogleGenAI, LiveServerMessage, Modality, Blob } from '@google/genai';
+import ChatHistoryModal from './ChatHistoryModal';
 
 
 // Helper functions for audio encoding/decoding
@@ -75,6 +76,7 @@ const Chat: React.FC<{ setView: (view: AppView) => void }> = ({ setView }) => {
     const [file, setFile] = useState<{ b64: string; type: string; name: string } | null>(null);
     const [isCameraOn, setIsCameraOn] = useState(false);
     const [isLive, setIsLive] = useState(false);
+    const [isHistoryVisible, setIsHistoryVisible] = useState(false);
     
     const chatRef = useRef<GeminiChat | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -102,6 +104,9 @@ const Chat: React.FC<{ setView: (view: AppView) => void }> = ({ setView }) => {
             } catch (e) {
                 console.error("Could not save chat history:", e);
             }
+        } else {
+            // If only the system message is left, remove the history from storage
+            localStorage.removeItem(`mindful-companion-chat-${persona}`);
         }
     }, [messages, persona]);
 
@@ -318,25 +323,71 @@ const Chat: React.FC<{ setView: (view: AppView) => void }> = ({ setView }) => {
         if (lowerMood.includes('sad') || lowerMood.includes('anxious')) return <Frown className="h-4 w-4 text-red-500" />;
         return <Meh className="h-4 w-4 text-yellow-500" />;
     };
+
+    const handleNewChat = () => {
+        if (window.confirm(`Are you sure you want to start a new chat with the ${persona}? This will clear your current conversation.`)) {
+            const instruction = personaInstructions[persona];
+            // FIX: Explicitly type `newMessages` to prevent TypeScript from widening the `role` property to `string`.
+            const newMessages: ChatMessage[] = [{ role: 'system', content: instruction }];
+            setMessages(newMessages);
+            chatRef.current = createChat(instruction, []);
+        }
+    };
+
+    const handleDeleteLastTurn = () => {
+        if (messages.length <= 1) return; // Can't delete system message
+
+        setMessages(prev => {
+            const newMessages = [...prev];
+            let lastUserIndex = -1;
+            for (let i = newMessages.length - 1; i >= 0; i--) {
+                if (newMessages[i].role === 'user') {
+                    lastUserIndex = i;
+                    break;
+                }
+            }
+
+            if (lastUserIndex !== -1) {
+                const finalMessages = newMessages.slice(0, lastUserIndex);
+                // Re-initialize chat with the truncated history
+                chatRef.current = createChat(personaInstructions[persona], finalMessages);
+                return finalMessages;
+            }
+            
+            return prev; // Should not happen if length > 1
+        });
+    };
+
+    const handleHistoryCleared = (clearedPersona: string) => {
+        // If the history for the currently active persona was cleared, refresh the chat view
+        if (clearedPersona === persona) {
+            handleNewChat();
+        }
+    };
     
     return (
         <div className="h-[calc(100vh-120px)] flex flex-col max-w-4xl mx-auto bg-white rounded-xl shadow-2xl overflow-hidden">
-            <div className="p-4 border-b flex justify-between items-center">
+            <div className="p-4 border-b flex justify-between items-center bg-gray-50">
                 <div className="flex items-center gap-4">
-                     <button onClick={() => setView(AppView.Home)} className="inline-flex items-center text-blue-600 hover:text-blue-800 transition-colors">
-                        <ArrowLeft className="h-5 w-5" />
+                     <button onClick={() => setView(AppView.Home)} className="p-2 rounded-full hover:bg-gray-200">
+                        <ArrowLeft className="h-5 w-5 text-gray-600" />
                     </button>
                     <div>
                         <h2 className="text-xl font-bold">AI {persona}</h2>
                          <div className="text-xs text-yellow-600">This is an AI, not a real professional.</div>
                     </div>
                 </div>
-                <select value={persona} onChange={e => setPersona(e.target.value as Persona)} className="p-2 rounded-md border bg-gray-50 focus:ring-2 focus:ring-blue-500">
-                    {Object.values(Persona).map(p => <option key={p} value={p}>{p}</option>)}
-                </select>
+                <div className="flex items-center gap-1">
+                     <button onClick={handleNewChat} title="New Chat" className="p-2 rounded-full hover:bg-gray-200 text-gray-600"><PlusSquare size={20}/></button>
+                     <button onClick={handleDeleteLastTurn} title="Delete Last Turn" className="p-2 rounded-full hover:bg-gray-200 text-gray-600"><Undo2 size={20}/></button>
+                     <button onClick={() => setIsHistoryVisible(true)} title="Chat History" className="p-2 rounded-full hover:bg-gray-200 text-gray-600"><History size={20}/></button>
+                    <select value={persona} onChange={e => setPersona(e.target.value as Persona)} className="p-2 rounded-md border bg-white focus:ring-2 focus:ring-blue-500">
+                        {Object.values(Persona).map(p => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-white">
                 {messages.filter(m => m.role !== 'system').map((msg, idx) => (
                     <div key={idx} className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                         {msg.role === 'model' && <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white flex-shrink-0"><Bot size={20} /></div>}
@@ -377,15 +428,16 @@ const Chat: React.FC<{ setView: (view: AppView) => void }> = ({ setView }) => {
                 <div className="flex items-center gap-2">
                     <button onClick={toggleCamera} className={`p-2 rounded-full ${isCameraOn ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-200'}`}><Video size={20}/></button>
                     <label className="p-2 rounded-full hover:bg-gray-200 cursor-pointer"><Paperclip size={20}/><input type="file" className="hidden" onChange={handleFileChange}/></label>
-                    <input type="text" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && !isLoading && handleSend()} placeholder={isLive ? "Live conversation is active..." : "Type a message..."} className="flex-1 p-2 border rounded-full px-4 bg-gray-700 text-white placeholder-gray-400 border-gray-600 focus:ring-2 focus:ring-blue-500" disabled={isLoading || isLive}/>
+                    <input type="text" value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && !isLoading && handleSend()} placeholder={isLive ? "Live conversation is active..." : "Type a message..."} className="flex-1 p-2 border rounded-full px-4 bg-white text-gray-800 placeholder-gray-500 border-gray-300 focus:ring-2 focus:ring-blue-500" disabled={isLoading || isLive}/>
                     {isLive ? (
                         <button onClick={stopLiveTalk} className="p-3 rounded-full bg-red-500 text-white animate-pulse"><MicOff size={20}/></button>
                     ) : (
                         <button onClick={startLiveTalk} className="p-3 rounded-full bg-green-500 text-white"><Mic size={20}/></button>
                     )}
-                    <button onClick={handleSend} disabled={isLoading || isLive} className="p-3 bg-blue-600 text-white rounded-full disabled:bg-gray-400"><Send size={20}/></button>
+                    <button onClick={handleSend} disabled={isLoading || isLive || (!input.trim() && !file) } className="p-3 bg-blue-600 text-white rounded-full disabled:bg-gray-400"><Send size={20}/></button>
                 </div>
             </div>
+            {isHistoryVisible && <ChatHistoryModal onClose={() => setIsHistoryVisible(false)} onHistoryCleared={handleHistoryCleared} />}
         </div>
     );
 };
