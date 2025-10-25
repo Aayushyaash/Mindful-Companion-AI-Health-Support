@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { AppView, ChatMessage, Persona } from '../types';
-import { createChat, analyzeMood } from '../services/geminiService';
+import { createChat, analyzeMood, extractInfoFromDocument } from '../services/geminiService';
 import { ArrowLeft, Send, Paperclip, X, Mic, MicOff, Video, VideoOff, Loader, User, Bot, Smile, Meh, Frown } from 'lucide-react';
-import type { Chat as GeminiChat, Part } from '@google/genai';
+import type { Chat as GeminiChat } from '@google/genai';
 import { GoogleGenAI, LiveServerMessage, Modality, Blob } from '@google/genai';
 
 
@@ -45,7 +45,6 @@ async function decodeAudioData(
     return buffer;
 }
 
-
 const personaInstructions = {
     [Persona.Friend]: "You are role-playing as a warm, empathetic, and supportive friend. Your tone is casual and caring. You listen without judgment and offer encouragement. CRITICAL: Fully commit to this role. Do not break character. Never mention that you are an AI. The user is aware this is a role-play. Avoid all disclaimers about not being a real professional. Format your responses using simple HTML for readability (e.g., `<strong>`, `<ul>`, `<li>`, `<p>`). Do not use `<html>`, `<head>`, `<body>` tags or CSS.",
     [Persona.Therapist]: "You are role-playing as a professional therapist. You maintain a calm, understanding, and clinical tone, guiding the user with thoughtful questions. CRITICAL: You must fully commit to this role-play. Do not break character by stating you are an AI or not a real therapist. The user is aware this is a simulation for support. Avoid all disclaimers. Format your responses using simple HTML for readability (e.g., `<strong>`, `<ul>`, `<li>`, `<p>`). Do not use `<html>`, `<head>`, `<body>` tags or CSS.",
@@ -55,7 +54,22 @@ const personaInstructions = {
 
 const Chat: React.FC<{ setView: (view: AppView) => void }> = ({ setView }) => {
     const [persona, setPersona] = useState<Persona>(Persona.Friend);
-    const [messages, setMessages] = useState<ChatMessage[]>([]);
+    
+    // Function to get chat history from localStorage or initialize it
+    const getChatHistory = (p: Persona): ChatMessage[] => {
+        try {
+            const historyJson = localStorage.getItem(`mindful-companion-chat-${p}`);
+            if (historyJson) {
+                return JSON.parse(historyJson);
+            }
+        } catch (e) {
+            console.error("Could not parse chat history:", e);
+        }
+        const instruction = personaInstructions[p];
+        return [{ role: 'system', content: instruction }];
+    };
+
+    const [messages, setMessages] = useState<ChatMessage[]>(() => getChatHistory(persona));
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [file, setFile] = useState<{ b64: string; type: string; name: string } | null>(null);
@@ -72,12 +86,25 @@ const Chat: React.FC<{ setView: (view: AppView) => void }> = ({ setView }) => {
     const outputAudioContextRef = useRef<AudioContext | null>(null);
     const liveStreamRef = useRef<MediaStream | null>(null);
 
+    // Initialize or re-initialize chat when persona changes
     useEffect(() => {
-        const instruction = personaInstructions[persona];
-        setMessages([{ role: 'system', content: instruction }]);
-        chatRef.current = createChat(instruction);
+        const history = getChatHistory(persona);
+        setMessages(history);
+        chatRef.current = createChat(personaInstructions[persona], history);
     }, [persona]);
     
+    // Save messages to localStorage whenever they change
+    useEffect(() => {
+        // We only save if there's more than the initial system message
+        if (messages.length > 1) {
+            try {
+                localStorage.setItem(`mindful-companion-chat-${persona}`, JSON.stringify(messages));
+            } catch (e) {
+                console.error("Could not save chat history:", e);
+            }
+        }
+    }, [messages, persona]);
+
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
@@ -106,6 +133,23 @@ const Chat: React.FC<{ setView: (view: AppView) => void }> = ({ setView }) => {
         return null;
     }, [isCameraOn]);
     
+     const saveDocumentAnalysis = (name: string, content: string) => {
+        try {
+            const documentsJson = localStorage.getItem('mindful-companion-documents');
+            const documents = documentsJson ? JSON.parse(documentsJson) : [];
+            const newDocument = {
+                id: `doc-${Date.now()}`,
+                name,
+                content,
+                timestamp: Date.now()
+            };
+            documents.push(newDocument);
+            localStorage.setItem('mindful-companion-documents', JSON.stringify(documents));
+        } catch (e) {
+            console.error("Failed to save document analysis:", e);
+        }
+    };
+    
     const handleSend = async () => {
         if (!input.trim() && !file) return;
 
@@ -113,50 +157,52 @@ const Chat: React.FC<{ setView: (view: AppView) => void }> = ({ setView }) => {
         const userMessageContent = input;
         setInput('');
 
-        let mood: string | undefined = undefined;
-        let imageForMessage: string | undefined = undefined;
-        
         const frameB64 = await captureFrame();
-        if (frameB64) {
-            mood = await analyzeMood(frameB64);
-        }
-
+        const mood = frameB64 ? await analyzeMood(frameB64) : undefined;
+        
         const userMessage: ChatMessage = { role: 'user', content: userMessageContent, mood };
         if (file) {
-            imageForMessage = `data:${file.type};base64,${file.b64}`;
-            userMessage.image = imageForMessage;
+            userMessage.image = `data:${file.type};base64,${file.b64}`;
         }
-
         setMessages(prev => [...prev, userMessage]);
         
-        let modelResponseText = '';
-        try {
-             if (!chatRef.current) throw new Error("Chat not initialized");
-            
-            if (file) {
-                const imagePart: Part = {
-                    inlineData: {
-                        data: file.b64,
-                        mimeType: file.type,
-                    }
+        const currentFile = file;
+        setFile(null); // Clear file from input immediately
+
+        if (currentFile) {
+            try {
+                const extractedText = await extractInfoFromDocument(currentFile.b64, currentFile.type);
+                saveDocumentAnalysis(currentFile.name, extractedText);
+
+                const analysisMessage: ChatMessage = {
+                    role: 'model',
+                    content: `<div class="p-2 border-l-4 border-blue-300"><strong>Analysis of ${currentFile.name}:</strong><br/>${extractedText}</div>`
                 };
-                const textPart: Part = { text: `Based on the attached file and my message, please respond. My message is: "${userMessageContent}"` };
+                setMessages(prev => [...prev, analysisMessage]);
                 
-                const result = await chatRef.current.sendMessage({ message: [imagePart, textPart] });
-                modelResponseText = result.text;
-            } else {
-                const result = await chatRef.current.sendMessage({ message: userMessageContent });
-                modelResponseText = result.text;
+                if (!chatRef.current) throw new Error("Chat not initialized");
+
+                const messageForModel = `A document was just analyzed. Here is the content:\n\n${extractedText}\n\nNow, based on this information, please respond to my original message: "${userMessageContent}"`;
+                const result = await chatRef.current.sendMessage({ message: messageForModel });
+                setMessages(prev => [...prev, { role: 'model', content: result.text }]);
+            } catch (error) {
+                console.error(error);
+                setMessages(prev => [...prev, { role: 'model', content: "I'm sorry, I encountered an error analyzing the document. Please try again." }]);
             }
-        } catch(error) {
-            console.error(error);
-            modelResponseText = "I'm sorry, I encountered an error. Please try again."
+        } else {
+            try {
+                if (!chatRef.current) throw new Error("Chat not initialized");
+                const result = await chatRef.current.sendMessage({ message: userMessageContent });
+                setMessages(prev => [...prev, { role: 'model', content: result.text }]);
+            } catch(error) {
+                console.error(error);
+                setMessages(prev => [...prev, { role: 'model', content: "I'm sorry, I encountered an error. Please try again." }]);
+            }
         }
         
-        setMessages(prev => [...prev, { role: 'model', content: modelResponseText }]);
-        setFile(null);
         setIsLoading(false);
     };
+
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const f = e.target.files?.[0];

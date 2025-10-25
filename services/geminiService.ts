@@ -33,6 +33,39 @@ export const analyzeImage = async (base64Image: string, mimeType: string, prompt
     }
 };
 
+export const extractInfoFromDocument = async (base64Image: string, mimeType: string): Promise<string> => {
+    try {
+        const imagePart = fileToGenerativePart(base64Image, mimeType);
+        const prompt = `You are an expert data extractor. Your task is to analyze the provided document (which could be a prescription, a lab result, a note, etc.) and extract the most important information.
+
+Format the output using simple, clean HTML.
+- Use <h3> for section titles.
+- Use <ul> and <li> for lists.
+- Use <strong> to highlight key terms.
+- Do not include <html>, <head>, or <body> tags. Do not use any CSS or <style> tags.
+
+**Extraction Rules:**
+1.  **Do not add any introductory text or preamble.** Directly start with the extracted HTML data.
+2.  Identify the type of document and extract relevant sections. For example:
+    *   For **prescriptions**: Patient Details, Doctor, Diagnosis, Medications, Instructions.
+    *   For **lab reports**: Patient Name, Test Name, Results, Reference Ranges, Date.
+    *   For general notes: Title, Date, Key Points.
+3.  **Be concise and clear.**
+4.  If the document is unreadable or not a recognizable document type, respond with only this exact text: 'This document could not be analyzed.'`;
+
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: { parts: [imagePart, { text: prompt }] },
+            config: { temperature: 0 }
+        });
+        return response.text;
+    } catch (error) {
+        console.error("Error extracting document info:", error);
+        return "Sorry, I couldn't analyze the document. Please try again.";
+    }
+};
+
+
 export const analyzeMood = async (base64Image: string): Promise<string> => {
     try {
         const imagePart = fileToGenerativePart(base64Image, 'image/jpeg');
@@ -48,9 +81,17 @@ export const analyzeMood = async (base64Image: string): Promise<string> => {
     }
 };
 
-export const createChat = (systemInstruction: string): Chat => {
+export const createChat = (systemInstruction: string, history: ChatMessage[] = []): Chat => {
+    const geminiHistory = history
+        .filter(m => m.role === 'user' || m.role === 'model') // Exclude system messages from history for the API
+        .map(m => ({
+            role: m.role,
+            parts: [{ text: m.content }] // simplified history for text-based continuity
+        }));
+
     return ai.chats.create({
         model: 'gemini-2.5-flash',
+        history: geminiHistory,
         config: {
             systemInstruction: systemInstruction,
             temperature: 0.9,
