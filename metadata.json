@@ -1,0 +1,8 @@
+{
+  "name": "Mindful Companion: AI Health Support",
+  "description": "An AI-powered mental health application offering prescription analysis, empathetic chat with mood assessment, voice conversations, and guided self-assessment quizzes to provide support and guidance.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
